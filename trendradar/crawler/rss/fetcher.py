@@ -14,6 +14,7 @@ from typing import List, Dict, Optional, Tuple, Callable
 import requests
 
 from .parser import RSSParser, ParsedRSSItem
+from .huggingface_papers import is_hf_daily_papers_url, parse_hf_daily_papers
 from trendradar.storage.base import RSSItem, RSSData
 from trendradar.utils.time import get_configured_time, is_within_days, DEFAULT_TIMEZONE
 
@@ -140,8 +141,12 @@ class RSSFetcher:
         try:
             response = self.session.get(feed.url, timeout=self.timeout)
             response.raise_for_status()
-
-            parsed_items = self.parser.parse(response.text, feed.url)
+            
+            # Hugging Face Daily Papers 不是 RSS/Atom/JSON Feed，需特殊解析
+            if is_hf_daily_papers_url(feed.url):
+                parsed_items = parse_hf_daily_papers(response.text, feed.url)
+            else:
+                parsed_items = self.parser.parse(response.text, feed.url)
 
             # 限制条目数量（0=不限制）
             if feed.max_items > 0:
