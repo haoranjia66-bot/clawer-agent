@@ -57,22 +57,16 @@ platforms:
   sources:
     - id: "toutiao"
       name: "今日头条"
-    - id: "baidu"
-      name: "百度热搜"
     - id: "wallstreetcn-hot"
       name: "华尔街见闻"
     - id: "thepaper"
       name: "澎湃新闻"
-    - id: "bilibili-hot-search"
-      name: "bilibili 热搜"
     - id: "cls-hot"
       name: "财联社热门"
     - id: "ifeng"
       name: "凤凰网"
     - id: "tieba"
       name: "贴吧"
-    - id: "weibo"
-      name: "微博"
     - id: "douyin"
       name: "抖音"
     - id: "zhihu"
@@ -112,22 +106,50 @@ rss:
   # - 不配置：使用全局 freshness_filter.max_age_days（默认 3 天）
   # - 正整数：覆盖全局设置，只推送此天数内的文章
   # - 0：禁用此频道的新鲜度过滤，推送所有文章
-  feeds:
-    - id: "hacker-news"
-      name: "Hacker News"
-      url: "https://hnrss.org/frontpage"
-      # max_age_days: 1               # 示例：只推送1天内的文章
+feeds:
 
-    - id: "ruanyifeng"
-      name: "阮一峰的网络日志"
-      url: "http://www.ruanyifeng.com/blog/atom.xml"
-      # max_age_days: 7               # 示例：推送7天内的文章（更新较慢的博客）
-    
-    - id: "yahoo-finance"
-      name: "雅虎财经"
-      url: "https://finance.yahoo.com/news/rssindex"
-      enabled: false                  # 禁用
+  - id: "hacker-news"
+    name: "Hacker News"
+    url: "https://hnrss.org/frontpage"
+    max_age_days: 1
 
+  - id: "ruanyifeng"
+    name: "阮一峰的网络日志"
+    url: "http://www.ruanyifeng.com/blog/atom.xml"
+    max_age_days: 7
+
+  # 🧠 AI 论文
+  - id: "arxiv-ai"
+    name: "arXiv AI"
+    url: "https://export.arxiv.org/rss/cs.AI"
+    max_age_days: 1
+
+  - id: "arxiv-robotics"
+    name: "arXiv Robotics"
+    url: "https://export.arxiv.org/rss/cs.RO"
+    max_age_days: 1
+
+  - id: "arxiv-ml"
+    name: "arXiv ML"
+    url: "https://export.arxiv.org/rss/cs.LG"
+    max_age_days: 1
+
+  # 🤖 公司技术博客
+  - id: "deepmind-blog"
+    name: "Google DeepMind"
+    url: "https://deepmind.google/blog/rss.xml"
+
+  - id: "openai-blog"
+    name: "OpenAI"
+    url: "https://openai.com/blog/rss.xml"
+
+  - id: "boston-dynamics"
+    name: "Boston Dynamics"
+    url: "https://bostondynamics.com/blog/feed/"
+
+  - id: "unitree-blog"
+    name: "Unitree"
+    url: "https://www.unitree.com/blog/rss.xml"
     # 自定义源示例
     # - id: "custom-feed"
     #   name: "自定义源"
