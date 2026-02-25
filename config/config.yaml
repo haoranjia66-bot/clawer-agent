@@ -150,6 +150,12 @@ rss:
     - id: "unitree-blog"
       name: "Unitree"
       url: "https://www.unitree.com/blog/rss.xml"
+      
+    - id: "hf-daily-papers"
+      name: "Hugging Face Daily Papers"
+      url: "https://huggingface.co/papers"
+      max_items: 50
+      max_age_days: 3
     # 自定义源示例
     # - id: "custom-feed"
     #   name: "自定义源"
