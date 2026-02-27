@@ -1325,6 +1325,21 @@ class NewsAnalyzer:
                 except (ValueError, TypeError):
                     pass
 
+        def is_paper_feed(feed_id: str, feed_name: str) -> bool:
+            fid = (feed_id or "").lower()
+            fname = (feed_name or "").lower()
+            if fid.startswith("arxiv-"):
+                return True
+            if "arxiv" in fname:
+                return True
+            if fid == "hf-daily-papers" or "hugging face daily papers" in fname:
+                return True
+            return False
+
+        # 先构建列表，同时收集需要补齐 short_summary 的条目
+        to_summarize = []  # [{"feed_id","url","title","abstract"}]
+        item_by_key = {}   # key -> rss_items index（用于回填）
+
         for feed_id, items in items_dict.items():
             # 确定此 feed 的 max_age_days
             max_days = feed_max_age_map.get(feed_id)
@@ -1348,15 +1363,75 @@ class NewsAnalyzer:
                             })
                         continue  # 跳过超过指定天数的文章
 
+                feed_name = id_to_name.get(feed_id, feed_id)
+
+                short_summary = getattr(item, "short_summary", "") or ""
+                short_summary = short_summary.strip()
+
                 rss_items.append({
                     "title": item.title,
                     "feed_id": feed_id,
-                    "feed_name": id_to_name.get(feed_id, feed_id),
+                    "feed_name": feed_name,
                     "url": item.url,
                     "published_at": item.published_at,
                     "summary": item.summary,
+                    "short_summary": short_summary,
                     "author": item.author,
                 })
+
+                # 仅对论文源补齐短摘要（优先使用缓存列；为空时才生成）
+                if is_paper_feed(feed_id, feed_name) and item.url and not short_summary:
+                    abstract = (item.summary or "").strip()
+                    if abstract:
+                        key = f"{feed_id}||{item.url}"
+                        item_by_key[key] = len(rss_items) - 1
+                        to_summarize.append({
+                            "key": key,
+                            "feed_id": feed_id,
+                            "url": item.url,
+                            "title": item.title,
+                            "abstract": abstract,
+                        })
+
+        # 批量生成短摘要，并写回数据库缓存（失败则静默降级为不展示摘要）
+        if to_summarize:
+            try:
+                from trendradar.ai.paper_summarizer import PaperSummarizer, PaperSummaryRequest
+
+                ai_cfg = self.ctx.config.get("AI", {})
+                summarizer = PaperSummarizer(ai_cfg, max_chars=100)
+
+                reqs = [
+                    PaperSummaryRequest(
+                        key=x["key"],
+                        title=x.get("title", ""),
+                        abstract=x.get("abstract", ""),
+                    )
+                    for x in to_summarize
+                ]
+                summaries = summarizer.summarize_batch(reqs)
+
+                updates = []
+                for x in to_summarize:
+                    key = x["key"]
+                    text = (summaries.get(key, "") or "").strip()
+                    if not text:
+                        continue
+                    idx = item_by_key.get(key)
+                    if idx is not None and 0 <= idx < len(rss_items):
+                        rss_items[idx]["short_summary"] = text
+                        updates.append({
+                            "feed_id": x["feed_id"],
+                            "url": x["url"],
+                            "short_summary": text,
+                        })
+
+                if updates:
+                    backend = self.storage_manager.get_backend()
+                    if hasattr(backend, "upsert_rss_short_summaries"):
+                        backend.upsert_rss_short_summaries(self.ctx.format_date(), updates)
+            except Exception as e:
+                print(f"[RSS] 生成论文短摘要失败（已降级为不展示摘要）: {e}")
 
         # 输出过滤统计
         if filtered_count > 0:
