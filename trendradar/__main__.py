@@ -1446,10 +1446,6 @@ class NewsAnalyzer:
                 ]
                 summaries = summarizer.summarize_batch(reqs)
 
-                if not summaries:
-                    print("[RSS] 未生成论文短摘要（可能未配置 AI_API_KEY/AI_MODEL 或模型输出格式异常）")
-                    return rss_items
-
                 updates = []
                 for x in to_summarize:
                     key = x["key"]
