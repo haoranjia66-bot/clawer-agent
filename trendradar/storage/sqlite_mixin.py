@@ -85,7 +85,33 @@ class SQLiteStorageMixin:
         else:
             raise FileNotFoundError(f"Schema file not found: {schema_path}")
 
+        # 兼容性迁移：为已存在的 RSS 数据库补齐新列
+        if db_type == "rss":
+            self._ensure_rss_short_summary_columns(conn)
+
         conn.commit()
+
+    def _ensure_rss_short_summary_columns(self, conn: sqlite3.Connection) -> None:
+        """
+        确保 rss_items 表存在 short_summary 相关列（兼容旧库）。
+        """
+        try:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(rss_items)")
+            cols = {row[1] for row in cur.fetchall()}  # row[1]=name
+
+            if "short_summary" not in cols:
+                cur.execute("ALTER TABLE rss_items ADD COLUMN short_summary TEXT DEFAULT ''")
+            if "short_summary_updated_at" not in cols:
+                cur.execute("ALTER TABLE rss_items ADD COLUMN short_summary_updated_at TEXT DEFAULT ''")
+
+            conn.commit()
+        except Exception:
+            # 迁移失败不应影响主流程（例如表不存在/权限/并发）
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     # ========================================
     # 新闻数据存储
@@ -917,6 +943,54 @@ class SQLiteStorageMixin:
             print(f"{log_prefix} 保存 RSS 数据失败: {e}")
             return False, 0, 0
 
+    def upsert_rss_short_summaries(
+        self,
+        date: Optional[str],
+        summaries: List[Dict[str, str]],
+    ) -> int:
+        """
+        批量写入 RSS 条目的 short_summary（以 feed_id+url 定位）。
+
+        Args:
+            date: 日期（YYYY-MM-DD），用于定位当日 RSS DB
+            summaries: [{"feed_id": "...", "url": "...", "short_summary": "..."}]
+
+        Returns:
+            实际更新的行数（近似值）
+        """
+        if not summaries:
+            return 0
+        try:
+            conn = self._get_connection(date, db_type="rss")
+            cursor = conn.cursor()
+            now_str = self._get_configured_time().strftime("%Y-%m-%d %H:%M:%S")
+
+            rows = []
+            for s in summaries:
+                feed_id = (s.get("feed_id") or "").strip()
+                url = (s.get("url") or "").strip()
+                short_summary = (s.get("short_summary") or "").strip()
+                if not feed_id or not url or not short_summary:
+                    continue
+                rows.append((short_summary, now_str, now_str, feed_id, url))
+
+            if not rows:
+                return 0
+
+            cursor.executemany(
+                """
+                UPDATE rss_items
+                SET short_summary = ?, short_summary_updated_at = ?, updated_at = ?
+                WHERE feed_id = ? AND url = ?
+                """,
+                rows,
+            )
+            conn.commit()
+            return len(rows)
+        except Exception as e:
+            print(f"[存储] 写入 RSS short_summary 失败: {e}")
+            return 0
+
     def _get_rss_data_impl(self, date: Optional[str] = None) -> Optional[RSSData]:
         """
         获取指定日期的所有 RSS 数据
@@ -934,7 +1008,7 @@ class SQLiteStorageMixin:
             # 获取所有 RSS 数据
             cursor.execute("""
                 SELECT i.id, i.title, i.feed_id, f.name as feed_name,
-                       i.url, i.published_at, i.summary, i.author,
+                       i.url, i.published_at, i.summary, i.short_summary, i.short_summary_updated_at, i.author,
                        i.first_crawl_time, i.last_crawl_time, i.crawl_count
                 FROM rss_items i
                 LEFT JOIN rss_feeds f ON i.feed_id = f.id
@@ -965,11 +1039,13 @@ class SQLiteStorageMixin:
                     url=row[4] or "",
                     published_at=row[5] or "",
                     summary=row[6] or "",
-                    author=row[7] or "",
-                    crawl_time=row[9],
-                    first_time=row[8],
-                    last_time=row[9],
-                    count=row[10],
+                    short_summary=(row[7] or ""),
+                    short_summary_updated_at=(row[8] or ""),
+                    author=row[9] or "",
+                    crawl_time=row[11],
+                    first_time=row[10],
+                    last_time=row[11],
+                    count=row[12],
                 ))
 
             # 获取最新的抓取时间
@@ -1089,7 +1165,7 @@ class SQLiteStorageMixin:
             # 获取该时间的 RSS 数据
             cursor.execute("""
                 SELECT i.id, i.title, i.feed_id, f.name as feed_name,
-                       i.url, i.published_at, i.summary, i.author,
+                       i.url, i.published_at, i.summary, i.short_summary, i.short_summary_updated_at, i.author,
                        i.first_crawl_time, i.last_crawl_time, i.crawl_count
                 FROM rss_items i
                 LEFT JOIN rss_feeds f ON i.feed_id = f.id
@@ -1121,11 +1197,13 @@ class SQLiteStorageMixin:
                     url=row[4] or "",
                     published_at=row[5] or "",
                     summary=row[6] or "",
-                    author=row[7] or "",
-                    crawl_time=row[9],
-                    first_time=row[8],
-                    last_time=row[9],
-                    count=row[10],
+                    short_summary=(row[7] or ""),
+                    short_summary_updated_at=(row[8] or ""),
+                    author=row[9] or "",
+                    crawl_time=row[11],
+                    first_time=row[10],
+                    last_time=row[11],
+                    count=row[12],
                 ))
 
             # 获取失败的源（针对最新一次抓取）

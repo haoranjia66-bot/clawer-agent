@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS rss_items (
     url TEXT NOT NULL,                        -- 文章链接
     published_at TEXT,                        -- RSS 发布时间（ISO 格式）
     summary TEXT,                             -- 摘要/描述
+    short_summary TEXT DEFAULT '',            -- 100 字摘要（用于推送展示，可选）
+    short_summary_updated_at TEXT DEFAULT '', -- 100 字摘要更新时间（YYYY-MM-DD HH:MM:SS）
     author TEXT,                              -- 作者
     first_crawl_time TEXT NOT NULL,           -- 首次抓取时间
     last_crawl_time TEXT NOT NULL,            -- 最后抓取时间
