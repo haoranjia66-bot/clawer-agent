@@ -1049,6 +1049,7 @@ def render_html_content(
                 time_display = title_data.get("time_display", "")
                 source_name = title_data.get("source_name", "")
                 is_new = title_data.get("is_new", False)
+                short_summary = (title_data.get("short_summary") or "").strip()
 
                 rss_html += """
                         <div class="rss-item">
@@ -1075,7 +1076,13 @@ def render_html_content(
                     rss_html += escaped_title
 
                 rss_html += """
-                            </div>
+                            </div>"""
+
+                if short_summary:
+                    rss_html += f"""
+                            <p class="rss-summary">{html_escape(short_summary)}</p>"""
+
+                rss_html += """
                         </div>"""
 
             rss_html += """
