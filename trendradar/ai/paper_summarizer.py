@@ -15,6 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from trendradar.ai.client import AIClient
 
+BATCH_SIZE = 10
+FALLBACK_MAX_CHARS = 200
+
 
 def _strip_ws(text: str) -> str:
     if not text:
@@ -30,6 +33,26 @@ def _truncate_chars(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip()
+
+
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    """截断到 max_chars 以内，尽量在句号/逗号/分号处断开，避免单词截断。"""
+    text = _strip_ws(text)
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    chunk = text[:max_chars]
+    for sep in [". ", "。", "；", "; ", ", ", "，"]:
+        pos = chunk.rfind(sep)
+        if pos > max_chars // 3:
+            return chunk[: pos + len(sep)].rstrip()
+
+    space_pos = chunk.rfind(" ")
+    if space_pos > max_chars // 3:
+        return chunk[:space_pos].rstrip() + "..."
+    return chunk.rstrip() + "..."
 
 
 def _extract_json(text: str) -> str:
@@ -70,26 +93,10 @@ class PaperSummarizer:
         text = _strip_ws(req.abstract) or _strip_ws(req.title)
         if not text:
             return ""
-        return _truncate_chars(text, self.max_chars)
+        return _truncate_at_sentence(text, FALLBACK_MAX_CHARS)
 
-    def summarize_batch(self, reqs: List[PaperSummaryRequest]) -> Dict[str, str]:
-        """
-        返回 {key: short_summary}。
-        AI 可用时走 AI 生成；不可用或调用失败时，降级为 abstract/title 截断。
-        """
-        if not reqs:
-            return {}
-
-        if not self._ai_enabled():
-            print("[RSS] AI 未配置，使用 abstract/title 截断作为短摘要")
-            return {r.key: self._fallback_summary(r) for r in reqs}
-
-        items = []
-        for r in reqs:
-            title = _strip_ws(r.title)
-            abstract = _truncate_chars(r.abstract, 1200)
-            items.append({"key": r.key, "title": title, "abstract": abstract})
-
+    def _call_ai_batch(self, items: List[Dict]) -> Dict[str, str]:
+        """对一批 items 调用 AI，返回 {key: summary}。"""
         system = (
             "你是一名中文论文摘要助手。基于论文标题与摘要，生成极短中文总结。"
             "输出必须严格为 JSON，不要输出任何额外文字。"
@@ -110,35 +117,80 @@ class PaperSummarizer:
             '{"<key>":"<summary>"}'
         )
 
-        try:
-            resp = self.client.chat(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.2,
-                max_tokens=800,
-            )
-        except Exception as e:
-            print(f"[RSS] AI 调用失败，降级为截断摘要: {e}")
-            return {r.key: self._fallback_summary(r) for r in reqs}
+        max_tok = max(len(items) * 120, 800)
+
+        resp = self.client.chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=max_tok,
+        )
 
         json_str = _extract_json(resp)
-        try:
-            data = json.loads(json_str)
-        except Exception:
-            print("[RSS] AI 返回 JSON 解析失败，降级为截断摘要")
-            return {r.key: self._fallback_summary(r) for r in reqs}
+        data = json.loads(json_str)
+        if not isinstance(data, dict):
+            return {}
+        return data
 
-        out: Dict[str, str] = {}
-        if isinstance(data, dict):
+    def summarize_batch(self, reqs: List[PaperSummaryRequest]) -> Dict[str, str]:
+        """
+        返回 {key: short_summary}。
+        AI 可用时分批调用 AI；不可用或调用失败时，降级为 abstract/title 截断。
+        fallback 结果会标记 _is_fallback=True 供调用方判断是否写入缓存。
+        """
+        if not reqs:
+            return {}
+
+        use_ai = self._ai_enabled()
+        if not use_ai:
+            print("[RSS] AI 未配置，使用 abstract/title 截断作为短摘要（不写入缓存）")
+            out = {}
             for r in reqs:
-                v = data.get(r.key, "")
+                fb = self._fallback_summary(r)
+                if fb:
+                    out[r.key] = fb
+            self._last_is_fallback = True
+            return out
+
+        self._last_is_fallback = False
+
+        prep = {}
+        for r in reqs:
+            title = _strip_ws(r.title)
+            abstract = _truncate_chars(r.abstract, 1200)
+            prep[r.key] = {"key": r.key, "title": title, "abstract": abstract}
+
+        keys = list(prep.keys())
+        out: Dict[str, str] = {}
+
+        for i in range(0, len(keys), BATCH_SIZE):
+            batch_keys = keys[i : i + BATCH_SIZE]
+            batch_items = [prep[k] for k in batch_keys]
+            batch_reqs = {r.key: r for r in reqs if r.key in batch_keys}
+
+            try:
+                ai_result = self._call_ai_batch(batch_items)
+            except Exception as e:
+                print(f"[RSS] AI 批次调用失败（第 {i // BATCH_SIZE + 1} 批），降级为截断: {e}")
+                for k in batch_keys:
+                    r = batch_reqs.get(k)
+                    if r:
+                        out[k] = self._fallback_summary(r)
+                self._last_is_fallback = True
+                continue
+
+            for k in batch_keys:
+                v = ai_result.get(k, "")
                 v = _strip_ws(str(v))
                 v = v.replace("\n", " ").replace("\r", " ")
-                out[r.key] = _truncate_chars(v, self.max_chars) if v else self._fallback_summary(r)
-        else:
-            print("[RSS] AI 返回非 dict 格式，降级为截断摘要")
-            return {r.key: self._fallback_summary(r) for r in reqs}
+                if v:
+                    out[k] = _truncate_chars(v, self.max_chars)
+                else:
+                    r = batch_reqs.get(k)
+                    if r:
+                        out[k] = self._fallback_summary(r)
+                        self._last_is_fallback = True
 
         return out
