@@ -77,13 +77,9 @@ class PaperSummarizer:
         if not reqs:
             return {}
 
-        # 无 AI 配置：降级为截断 abstract（可能是英文）
+        # 无 AI 配置：不生成（避免把英文 abstract 缓存成“短摘要”）
         if not self._ai_enabled():
-            out: Dict[str, str] = {}
-            for r in reqs:
-                base = r.abstract or r.title
-                out[r.key] = _truncate_chars(base, self.max_chars)
-            return out
+            return {}
 
         # 构建输入 payload，控制体积：abstract 过长先截断
         items = []
@@ -93,7 +89,7 @@ class PaperSummarizer:
             items.append({"key": r.key, "title": title, "abstract": abstract})
 
         system = (
-            "你是一名中文论文摘要助手。你将基于论文标题与摘要，生成极短中文总结。"
+            "你是一名中文论文摘要助手。基于论文标题与摘要，生成极短中文总结。"
             "输出必须严格为 JSON，不要输出任何额外文字。"
         )
         user = (
@@ -101,6 +97,7 @@ class PaperSummarizer:
             "- 只输出一句话或两句短句，但不得换行（最终值中不得包含\\n）\n"
             "- 聚焦：研究问题/方法/贡献/结果（尽量覆盖）\n"
             "- 不要写“本文提出/本文研究”这类套话\n"
+            "- 尽量不要出现英文；若不可避免，保留必要缩写即可\n"
             "- 不要编号，不要Markdown\n"
             "- 若信息不足，用标题信息做合理概括\n"
             "\n"
@@ -124,12 +121,8 @@ class PaperSummarizer:
         try:
             data = json.loads(json_str)
         except Exception:
-            # 解析失败：整体降级
-            out: Dict[str, str] = {}
-            for r in reqs:
-                base = r.abstract or r.title
-                out[r.key] = _truncate_chars(base, self.max_chars)
-            return out
+            # 解析失败：不写入（避免缓存脏数据）
+            return {}
 
         out: Dict[str, str] = {}
         if isinstance(data, dict):
@@ -137,10 +130,9 @@ class PaperSummarizer:
                 v = data.get(r.key, "")
                 v = _strip_ws(str(v))
                 v = v.replace("\n", " ").replace("\r", " ")
-                out[r.key] = _truncate_chars(v, self.max_chars) if v else _truncate_chars((r.abstract or r.title), self.max_chars)
+                out[r.key] = _truncate_chars(v, self.max_chars) if v else ""
         else:
-            for r in reqs:
-                out[r.key] = _truncate_chars((r.abstract or r.title), self.max_chars)
+            return {}
 
         return out
 
