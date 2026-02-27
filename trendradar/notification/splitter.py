@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Callable
 
 from trendradar.report.formatter import format_title_for_platform
-from trendradar.report.helpers import format_rank_display
+from trendradar.report.helpers import format_rank_display, html_escape
 from trendradar.utils.time import DEFAULT_TIMEZONE, format_iso_time_friendly, convert_time_for_display
 
 
@@ -23,6 +23,33 @@ DEFAULT_BATCH_SIZES = {
 
 # 默认区域顺序
 DEFAULT_REGION_ORDER = ["hotlist", "rss", "new_items", "standalone", "ai_analysis"]
+
+
+def _format_short_summary_line(title_data: Dict, format_type: str) -> str:
+    """
+    为单条 RSS/论文条目生成“下一行摘要”。
+
+    约束：避免以 4 个空格开头，防止部分 Markdown 渠道渲染为代码块。
+    """
+    summary = (title_data.get("short_summary") or "").strip()
+    if not summary:
+        return ""
+
+    summary = summary.replace("\r", " ").replace("\n", " ").strip()
+    if not summary:
+        return ""
+
+    if format_type == "telegram":
+        summary = html_escape(summary)
+
+    if format_type == "feishu":
+        summary = html_escape(summary)
+        return f"  <font color='grey'>↳ 摘要：{summary}</font>\n"
+
+    if format_type == "slack":
+        return f"  ↳ _摘要：{summary}_\n"
+
+    return f"  ↳ 摘要：{summary}\n"
 
 
 def split_content_into_batches(
@@ -973,9 +1000,30 @@ def _process_rss_stats_section(
             else:
                 formatted_title = f"{first_title_data['title']}"
 
-            first_news_line = f"  1. {formatted_title}\n"
+            base_line = f"  1. {formatted_title}\n"
+            summary_line = _format_short_summary_line(first_title_data, format_type)
+
+            first_news_line_with = base_line + summary_line
+            first_news_line_without = base_line
+
+            # 在列表项之间加空行（保持原有展示风格）
             if len(stat["titles"]) > 1:
-                first_news_line += "\n"
+                first_news_line_with += "\n"
+                first_news_line_without += "\n"
+
+            # 超长降级：如果带摘要放不下但不带摘要能放下，则丢摘要保标题
+            word_with_first_try = word_header + first_news_line_with
+            word_with_first_alt = word_header + first_news_line_without
+            test_with = current_batch + word_with_first_try
+            test_without = current_batch + word_with_first_alt
+            if (
+                summary_line
+                and len(test_with.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes
+                and len(test_without.encode("utf-8")) + len(base_footer.encode("utf-8")) < max_bytes
+            ):
+                first_news_line = first_news_line_without
+            else:
+                first_news_line = first_news_line_with
 
         # 原子性检查：关键词标题 + 第一条新闻必须一起处理
         word_with_first_news = word_header + first_news_line
@@ -984,6 +1032,27 @@ def _process_rss_stats_section(
         if len(test_content.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes:
             if current_batch_has_content:
                 batches.append(current_batch + base_footer)
+            # 新批次再尝试一次降级（防止因摘要导致新批次超限）
+            if stat["titles"]:
+                first_title_data = stat["titles"][0]
+                # 复用已计算的 first_news_line 可能已降级；但这里再做一次更保险
+                # 如果 current_batch 是新批次的 base_header+rss_header，不带摘要能放下就丢摘要
+                try_with = base_header + rss_header + word_header + first_news_line
+                if len(try_with.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes:
+                    # 尝试去掉摘要（只在存在摘要时）
+                    formatted_title = format_title_for_platform(
+                        "feishu" if format_type == "feishu" else
+                        "dingtalk" if format_type == "dingtalk" else
+                        "telegram" if format_type == "telegram" else
+                        "ntfy" if format_type == "ntfy" else
+                        "slack" if format_type == "slack" else
+                        "wework",
+                        first_title_data,
+                        show_source=True
+                    )
+                    base_line = f"  1. {formatted_title}\n"
+                    alt = base_line + ("\n" if len(stat["titles"]) > 1 else "")
+                    word_with_first_news = word_header + alt
             current_batch = base_header + rss_header + word_with_first_news
             current_batch_has_content = True
             start_index = 1
@@ -1010,9 +1079,25 @@ def _process_rss_stats_section(
             else:
                 formatted_title = f"{title_data['title']}"
 
-            news_line = f"  {j + 1}. {formatted_title}\n"
+            base_line = f"  {j + 1}. {formatted_title}\n"
+            summary_line = _format_short_summary_line(title_data, format_type)
+            news_line_with = base_line + summary_line
+            news_line_without = base_line
             if j < len(stat["titles"]) - 1:
-                news_line += "\n"
+                news_line_with += "\n"
+                news_line_without += "\n"
+
+            # 超长降级：优先丢摘要保标题
+            test_with = current_batch + news_line_with
+            test_without = current_batch + news_line_without
+            if (
+                summary_line
+                and len(test_with.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes
+                and len(test_without.encode("utf-8")) + len(base_footer.encode("utf-8")) < max_bytes
+            ):
+                news_line = news_line_without
+            else:
+                news_line = news_line_with
 
             test_content = current_batch + news_line
             if len(test_content.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes:
@@ -1179,7 +1264,22 @@ def _process_rss_new_titles_section(
             else:
                 formatted_title = f"{first_title_data['title']}"
 
-            first_news_line = f"  1. {formatted_title}\n"
+            base_line = f"  1. {formatted_title}\n"
+            summary_line = _format_short_summary_line(first_title_data, format_type)
+            first_news_line_with = base_line + summary_line
+            first_news_line_without = base_line
+
+            # 超长降级：带摘要放不下则丢摘要
+            test_with = current_batch + source_header + first_news_line_with
+            test_without = current_batch + source_header + first_news_line_without
+            if (
+                summary_line
+                and len(test_with.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes
+                and len(test_without.encode("utf-8")) + len(base_footer.encode("utf-8")) < max_bytes
+            ):
+                first_news_line = first_news_line_without
+            else:
+                first_news_line = first_news_line_with
 
         # 原子性检查：来源标题 + 第一条新闻必须一起处理
         source_with_first_news = source_header + first_news_line
@@ -1215,7 +1315,21 @@ def _process_rss_new_titles_section(
             else:
                 formatted_title = f"{title_data['title']}"
 
-            news_line = f"  {j + 1}. {formatted_title}\n"
+            base_line = f"  {j + 1}. {formatted_title}\n"
+            summary_line = _format_short_summary_line(title_data, format_type)
+            news_line_with = base_line + summary_line
+            news_line_without = base_line
+
+            test_with = current_batch + news_line_with
+            test_without = current_batch + news_line_without
+            if (
+                summary_line
+                and len(test_with.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes
+                and len(test_without.encode("utf-8")) + len(base_footer.encode("utf-8")) < max_bytes
+            ):
+                news_line = news_line_without
+            else:
+                news_line = news_line_with
 
             test_content = current_batch + news_line
             if len(test_content.encode("utf-8")) + len(base_footer.encode("utf-8")) >= max_bytes:
@@ -1623,6 +1737,7 @@ def _format_standalone_rss_item(
     url = item.get("url", "")
     published_at = item.get("published_at", "")
     author = item.get("author", "")
+    short_summary = (item.get("short_summary") or "").strip()
 
     # 使用友好时间格式
     friendly_time = ""
@@ -1669,4 +1784,14 @@ def _format_standalone_rss_item(
             item_line += f" `{meta_str}`"
 
     item_line += "\n"
+    if short_summary:
+        # 注意：避免 4 空格前缀导致 Markdown 渲染为代码块
+        if format_type == "telegram":
+            item_line += f"  ↳ 摘要：{html_escape(short_summary)}\n"
+        elif format_type == "feishu":
+            item_line += f"  <font color='grey'>↳ 摘要：{html_escape(short_summary)}</font>\n"
+        elif format_type == "slack":
+            item_line += f"  ↳ _摘要：{short_summary}_\n"
+        else:
+            item_line += f"  ↳ 摘要：{short_summary}\n"
     return item_line
