@@ -3,7 +3,7 @@
 论文/技术文章短摘要（100字）生成器
 
 用于 RSS 论文源（如 arXiv）在推送中为每条条目生成固定长度的中文 summary。
-优先使用 AI（若已配置），否则降级为从原 summary 截断。
+优先使用 AI（若已配置），否则降级为从原 abstract/title 截断。
 """
 
 from __future__ import annotations
@@ -24,9 +24,6 @@ def _strip_ws(text: str) -> str:
 
 
 def _truncate_chars(text: str, max_chars: int) -> str:
-    """
-    以“字符数”截断（近似满足“100字”需求）。
-    """
     text = _strip_ws(text)
     if not text:
         return ""
@@ -36,9 +33,7 @@ def _truncate_chars(text: str, max_chars: int) -> str:
 
 
 def _extract_json(text: str) -> str:
-    """
-    从模型回复中提取 JSON（兼容 ```json ...``` 或 ``` ...```）。
-    """
+    """从模型回复中提取 JSON（兼容 ```json ...``` 或 ``` ...```）。"""
     if not text:
         return ""
     raw = text.strip()
@@ -70,22 +65,29 @@ class PaperSummarizer:
         ok, _ = self.client.validate_config()
         return ok
 
+    def _fallback_summary(self, req: PaperSummaryRequest) -> str:
+        """AI 不可用时，从 abstract 或 title 截断生成 fallback 摘要。"""
+        text = _strip_ws(req.abstract) or _strip_ws(req.title)
+        if not text:
+            return ""
+        return _truncate_chars(text, self.max_chars)
+
     def summarize_batch(self, reqs: List[PaperSummaryRequest]) -> Dict[str, str]:
         """
-        返回 {key: short_summary}
+        返回 {key: short_summary}。
+        AI 可用时走 AI 生成；不可用或调用失败时，降级为 abstract/title 截断。
         """
         if not reqs:
             return {}
 
-        # 无 AI 配置：不生成（避免把英文 abstract 缓存成“短摘要”）
         if not self._ai_enabled():
-            return {}
+            print("[RSS] AI 未配置，使用 abstract/title 截断作为短摘要")
+            return {r.key: self._fallback_summary(r) for r in reqs}
 
-        # 构建输入 payload，控制体积：abstract 过长先截断
         items = []
         for r in reqs:
             title = _strip_ws(r.title)
-            abstract = _truncate_chars(r.abstract, 1200)  # 避免单条太长
+            abstract = _truncate_chars(r.abstract, 1200)
             items.append({"key": r.key, "title": title, "abstract": abstract})
 
         system = (
@@ -96,7 +98,7 @@ class PaperSummarizer:
             "请为每条输入生成一段【不超过100个汉字】的简体中文摘要，要求：\n"
             "- 只输出一句话或两句短句，但不得换行（最终值中不得包含\\n）\n"
             "- 聚焦：研究问题/方法/贡献/结果（尽量覆盖）\n"
-            "- 不要写“本文提出/本文研究”这类套话\n"
+            "- 不要写\u201c本文提出/本文研究\u201d这类套话\n"
             "- 尽量不要出现英文；若不可避免，保留必要缩写即可\n"
             "- 不要编号，不要Markdown\n"
             "- 若信息不足，用标题信息做合理概括\n"
@@ -108,21 +110,25 @@ class PaperSummarizer:
             '{"<key>":"<summary>"}'
         )
 
-        resp = self.client.chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=800,
-        )
+        try:
+            resp = self.client.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=800,
+            )
+        except Exception as e:
+            print(f"[RSS] AI 调用失败，降级为截断摘要: {e}")
+            return {r.key: self._fallback_summary(r) for r in reqs}
 
         json_str = _extract_json(resp)
         try:
             data = json.loads(json_str)
         except Exception:
-            # 解析失败：不写入（避免缓存脏数据）
-            return {}
+            print("[RSS] AI 返回 JSON 解析失败，降级为截断摘要")
+            return {r.key: self._fallback_summary(r) for r in reqs}
 
         out: Dict[str, str] = {}
         if isinstance(data, dict):
@@ -130,9 +136,9 @@ class PaperSummarizer:
                 v = data.get(r.key, "")
                 v = _strip_ws(str(v))
                 v = v.replace("\n", " ").replace("\r", " ")
-                out[r.key] = _truncate_chars(v, self.max_chars) if v else ""
+                out[r.key] = _truncate_chars(v, self.max_chars) if v else self._fallback_summary(r)
         else:
-            return {}
+            print("[RSS] AI 返回非 dict 格式，降级为截断摘要")
+            return {r.key: self._fallback_summary(r) for r in reqs}
 
         return out
-
