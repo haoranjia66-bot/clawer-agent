@@ -1336,6 +1336,39 @@ class NewsAnalyzer:
                 return True
             return False
 
+        def _clean_paper_abstract(text: str) -> str:
+            """
+            清洗 arXiv RSS 常见的 summary 前缀元信息，尽量只保留正文 abstract。
+            """
+            if not text:
+                return ""
+            s = str(text).strip()
+            # 常见格式：arXiv:xxxx Announce Type: ... Abstract: ...
+            s = re.sub(r"(?is)^\s*arxiv:\s*\S+\s+announce\s+type:\s*.*?abstract:\s*", "", s)
+            s = re.sub(r"(?is)\bannounce\s+type:\s*.*?abstract:\s*", "", s)
+            s = re.sub(r"(?is)^\s*abstract:\s*", "", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        def _looks_non_chinese_or_meta(text: str) -> bool:
+            """
+            判断已缓存 short_summary 是否是英文/元信息/脏数据，满足则触发重生成覆盖缓存。
+            """
+            if not text:
+                return False
+            t = str(text).strip()
+            if not t:
+                return False
+            if re.search(r"(?i)\babstract\b|\bannounce\s+type\b", t):
+                return True
+            if re.search(r"(?i)\barxiv:\d{4}\.\d{4,6}", t):
+                return True
+            # 统计中文字符占比：很低则认为可能是英文
+            chinese = len(re.findall(r"[\u4e00-\u9fff]", t))
+            if len(t) >= 30 and chinese / max(len(t), 1) < 0.15:
+                return True
+            return False
+
         # 先构建列表，同时收集需要补齐 short_summary 的条目
         to_summarize = []  # [{"feed_id","url","title","abstract"}]
         item_by_key = {}   # key -> rss_items index（用于回填）
@@ -1367,6 +1400,7 @@ class NewsAnalyzer:
 
                 short_summary = getattr(item, "short_summary", "") or ""
                 short_summary = short_summary.strip()
+                needs_regen = _looks_non_chinese_or_meta(short_summary)
 
                 rss_items.append({
                     "title": item.title,
@@ -1379,19 +1413,20 @@ class NewsAnalyzer:
                     "author": item.author,
                 })
 
-                # 仅对论文源补齐短摘要（优先使用缓存列；为空时才生成）
-                if is_paper_feed(feed_id, feed_name) and item.url and not short_summary:
-                    abstract = (item.summary or "").strip()
-                    if abstract:
-                        key = f"{feed_id}||{item.url}"
-                        item_by_key[key] = len(rss_items) - 1
-                        to_summarize.append({
-                            "key": key,
-                            "feed_id": feed_id,
-                            "url": item.url,
-                            "title": item.title,
-                            "abstract": abstract,
-                        })
+                # 仅对论文源补齐/刷新短摘要
+                if is_paper_feed(feed_id, feed_name) and item.url and (not short_summary or needs_regen):
+                    abstract_raw = (item.summary or "").strip()
+                    abstract = _clean_paper_abstract(abstract_raw)
+                    # 即使没有 abstract，也允许用标题生成（保证“每篇都有”）
+                    key = f"{feed_id}||{item.url}"
+                    item_by_key[key] = len(rss_items) - 1
+                    to_summarize.append({
+                        "key": key,
+                        "feed_id": feed_id,
+                        "url": item.url,
+                        "title": item.title,
+                        "abstract": abstract,
+                    })
 
         # 批量生成短摘要，并写回数据库缓存（失败则静默降级为不展示摘要）
         if to_summarize:
@@ -1410,6 +1445,10 @@ class NewsAnalyzer:
                     for x in to_summarize
                 ]
                 summaries = summarizer.summarize_batch(reqs)
+
+                if not summaries:
+                    print("[RSS] 未生成论文短摘要（可能未配置 AI_API_KEY/AI_MODEL 或模型输出格式异常）")
+                    return rss_items
 
                 updates = []
                 for x in to_summarize:
